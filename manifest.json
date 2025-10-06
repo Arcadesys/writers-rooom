@@ -1,11 +1,10 @@
 {
-	"id": "writers-room",
-	"name": "Writers Room",
-	"version": "1.0.0",
-	"minAppVersion": "0.15.0",
-	"description": "Framework for designing custom agents using Claude Agents SDK.",
+	"id": "writers-rooom",
+	"name": "Writer Room",
+	"version": "0.0.1",
+	"minAppVersion": "1.5.0",
+	"description": "Define multiple AI agents and render inline feedback in your notes.",
 	"author": "Austen Tucker",
 	"authorUrl": "https://thearcades.me",
-	"fundingUrl": "https://thearcades.me",
 	"isDesktopOnly": false
 }

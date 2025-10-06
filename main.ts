@@ -1,134 +1,170 @@
-import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
+import { Editor, Notice, Plugin, MarkdownView, TFile } from "obsidian";
+import { DEFAULT_SETTINGS, type WriterAgent, type WriterRoomSettings, runAgentsSequential, type WriterComment } from "./agent";
+import { applyComments, clearComments } from "./comment-renderer";
+import { WriterRoomSettingTab } from "./settings";
 
-// Remember to rename these classes and interfaces!
-
-interface MyPluginSettings {
-	mySetting: string;
-}
-
-const DEFAULT_SETTINGS: MyPluginSettings = {
-	mySetting: 'default'
-}
-
-export default class MyPlugin extends Plugin {
-	settings: MyPluginSettings;
+export default class WriterRoomPlugin extends Plugin {
+	settings: WriterRoomSettings;
 
 	async onload() {
 		await this.loadSettings();
 
-		// This creates an icon in the left ribbon.
-		const ribbonIconEl = this.addRibbonIcon('dice', 'Sample Plugin', (_evt: MouseEvent) => {
-			// Called when the user clicks the icon.
-			new Notice('This is a notice!');
-		});
-		// Perform additional things with the ribbon
-		ribbonIconEl.addClass('my-plugin-ribbon-class');
+		// settings tab for agent configuration and API setup
+		this.addSettingTab(new WriterRoomSettingTab(this.app, this));
 
-		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
-		const statusBarItemEl = this.addStatusBarItem();
-		statusBarItemEl.setText('Status Bar Text');
-
-		// This adds a simple command that can be triggered anywhere
-		this.addCommand({
-			id: 'open-sample-modal-simple',
-			name: 'Open sample modal (simple)',
-			callback: () => {
-				new SampleModal(this.app).open();
+		// ribbon button to trigger feedback run on the active note
+		this.addRibbonIcon("bot", "Run Writer Room", async () => {
+			const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+			const editor = view?.editor;
+			if (!editor) {
+				new Notice("Open a Markdown file to run Writer Room.");
+				return;
 			}
+			await this.runWriterRoom(editor, view);
 		});
-		// This adds an editor command that can perform some operation on the current editor instance
+
+		// command palette shortcut
 		this.addCommand({
-			id: 'sample-editor-command',
-			name: 'Sample editor command',
-			editorCallback: (editor: Editor, _view: MarkdownView) => {
-				console.log(editor.getSelection());
-				editor.replaceSelection('Sample Editor Command');
-			}
+			id: "writer-room-run",
+			name: "Run Writer Room",
+			hotkeys: [{ modifiers: ["Mod", "Shift"], key: "R" }],
+			editorCallback: async (editor, view) => {
+				await this.runWriterRoom(editor, view as MarkdownView);
+			},
 		});
-		// This adds a complex command that can check whether the current state of the app allows execution of the command
+
+		// editor context menu entry
+		this.registerEvent(
+			this.app.workspace.on("editor-menu", (menu, editor, view) => {
+				menu.addItem((item) =>
+					item
+						.setTitle("Run Writer Room")
+						.setIcon("bot")
+						.onClick(async () => {
+							await this.runWriterRoom(editor, view as MarkdownView);
+						})
+				);
+			})
+		);
+
+		// command to clear inline comments
 		this.addCommand({
-			id: 'open-sample-modal-complex',
-			name: 'Open sample modal (complex)',
-			checkCallback: (checking: boolean) => {
-				// Conditions to check
-				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
-				if (markdownView) {
-					// If checking is true, we're simply "checking" if the command can be run.
-					// If checking is false, then we want to actually perform the operation.
-					if (!checking) {
-						new SampleModal(this.app).open();
-					}
-
-					// This command will only show up in Command Palette when the check function returns true
-					return true;
-				}
-			}
+			id: "writer-room-clear-comments",
+			name: "Clear Writer Room Comments",
+			hotkeys: [{ modifiers: ["Mod", "Shift"], key: "C" }],
+			editorCallback: async (editor, view) => {
+				const cm: any = (view as any)?.editor?.cm;
+				if (cm) clearComments(cm);
+				new Notice("Writer Room: Cleared comments.");
+			},
 		});
 
-		// This adds a settings tab so the user can configure various aspects of the plugin
-		this.addSettingTab(new SampleSettingTab(this.app, this));
-
-		// If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-		// Using this function will automatically remove the event listener when this plugin is disabled.
-		this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
-			console.log('click', evt);
+		// export feedback summary into a new note
+		this.addCommand({
+			id: "writer-room-export-feedback",
+			name: "Export Writer Room Feedback",
+			callback: async () => {
+				await this.exportFeedback();
+			},
 		});
-
-		// When registering intervals, this function will automatically clear the interval when the plugin is disabled.
-		this.registerInterval(window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000));
 	}
 
 	onunload() {
-
+		// placeholder for future cleanup hooks
 	}
 
 	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+		const data = await this.loadData();
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
 	}
 
 	async saveSettings() {
 		await this.saveData(this.settings);
 	}
-}
 
-class SampleModal extends Modal {
-	constructor(app: App) {
-		super(app);
+	// orchestrates agent execution and inline feedback application
+	async runWriterRoom(editor: Editor, view?: MarkdownView) {
+		const doc = editor.getValue();
+		const enabledAgents = (this.settings.agents || []).filter((a: WriterAgent) => a.enabled);
+
+		if (!enabledAgents.length) {
+			new Notice("Writer Room: No enabled agents. Add or enable in settings.");
+			return;
+		}
+
+		if (!this.settings.apiKey) {
+			new Notice("Writer Room: Missing API key in settings.");
+			return;
+		}
+
+		const status = this.addStatusBarItem();
+		status.setText(`Writer Room: Running ${enabledAgents.length} agent(s)...`);
+		new Notice(`Writer Room: Running ${enabledAgents.length} agent(s)...`);
+		console.log("Writer Room → Document length:", doc.length);
+
+		try {
+			const results = await runAgentsSequential(this.settings, enabledAgents, doc);
+			let totalComments = 0;
+			const allComments: WriterComment[] = [];
+			for (const r of results) {
+				if (r.error) {
+					console.warn(`Agent ${r.agent.name} error:`, r.error);
+				}
+				console.group(`Writer Room → ${r.agent.name}`);
+				for (const c of r.comments) {
+					console.log(`[LINE:${c.line}]`, c.text);
+				}
+				console.groupEnd();
+				totalComments += r.comments.length;
+				allComments.push(...r.comments);
+			}
+			const cm: any = (view as any)?.editor?.cm;
+			if (cm) {
+				applyComments(cm, allComments);
+			}
+			new Notice(`Writer Room: Done. Parsed ${totalComments} comment(s).`);
+			(this as any)._lastResults = results;
+		} catch (e: any) {
+			console.error("Writer Room → run error", e);
+			new Notice("Writer Room: Error running agents (see console).");
+		}
+		status.remove();
 	}
 
-	onOpen() {
-		const {contentEl} = this;
-		contentEl.setText('Woah!');
-	}
+	private async exportFeedback() {
+		const results = (this as any)._lastResults as
+			{ agent: { name: string }; comments: WriterComment[]; error?: string }[] | undefined;
+		if (!results || !results.length) {
+			new Notice("Writer Room: No feedback to export. Run first.");
+			return;
+		}
+		const file = this.app.workspace.getActiveFile();
+		const base = file ? file.basename : "Untitled";
+		const ts = new Date().toISOString().replace(/[:.]/g, "-");
+		const name = `Writer Room Feedback - ${base} - ${ts}.md`;
+		const dir = file?.parent ?? this.app.vault.getRoot();
+		const path = dir.path === "/" ? name : `${dir.path}/${name}`;
 
-	onClose() {
-		const {contentEl} = this;
-		contentEl.empty();
-	}
-}
+		let md = `# Writer Room Feedback\n\nSource: ${file ? file.path : "(unsaved)"}\nDate: ${new Date().toLocaleString()}\n\n`;
+		for (const r of results) {
+			md += `## ${r.agent.name}\n\n`;
+			if (r.error) {
+				md += `- Error: ${r.error}\n\n`;
+			}
+			for (const c of r.comments) {
+				md += `- [LINE:${c.line}] ${c.text}\n`;
+			}
+			md += `\n`;
+		}
 
-class SampleSettingTab extends PluginSettingTab {
-	plugin: MyPlugin;
-
-	constructor(app: App, plugin: MyPlugin) {
-		super(app, plugin);
-		this.plugin = plugin;
-	}
-
-	display(): void {
-		const {containerEl} = this;
-
-		containerEl.empty();
-
-		new Setting(containerEl)
-			.setName('Setting #1')
-			.setDesc('It\'s a secret')
-			.addText(text => text
-				.setPlaceholder('Enter your secret')
-				.setValue(this.plugin.settings.mySetting)
-				.onChange(async (value) => {
-					this.plugin.settings.mySetting = value;
-					await this.plugin.saveSettings();
-				}));
+		try {
+			const created = await this.app.vault.create(path, md);
+			new Notice(`Writer Room: Exported feedback → ${created.path}`);
+			const leaf = this.app.workspace.getLeaf(true);
+			await leaf.openFile(created as TFile);
+		} catch (e: any) {
+			console.error("Writer Room → export error", e);
+			new Notice("Writer Room: Failed to export feedback.");
+		}
 	}
 }

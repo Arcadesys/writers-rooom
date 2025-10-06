@@ -1,8 +1,19 @@
-/*
+/* Writer Room styles - placeholder for future UI/comment styling */
 
-This CSS file will be included with your plugin, and
-available in the app when your plugin is enabled.
+.wr-section-header {
+	display: flex;
+	align-items: center;
+	gap: 0.75rem;
+}
 
-If your plugin does not need CSS, delete this file.
+.wr-agent-block {
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 8px;
+	padding: 8px 10px;
+	margin: 8px 0 14px 0;
+}
 
-*/
+/* Inline comment bubble fallback styles (CM6 theme also sets some) */
+.wr-comment-bubble {
+	color: var(--text-normal);
+}
