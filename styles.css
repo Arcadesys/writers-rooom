@@ -1,16 +1,87 @@
-/* Writer Room styles - placeholder for future UI/comment styling */
+/* Writer Room sidebar */
 
-.wr-section-header {
+.wr-sidebar {
+	display: flex;
+	flex-direction: column;
+	gap: 1rem;
+	padding: var(--size-4-3);
+}
+
+.wr-sidebar-header h2 {
+	margin: 0;
+}
+
+.wr-sidebar-active {
+	margin: 0;
+	font-size: 0.85rem;
+	color: var(--text-muted);
+}
+
+.wr-sidebar-list {
+	display: flex;
+	flex-direction: column;
+	gap: 0.5rem;
+}
+
+.wr-sidebar-item {
+	padding: 0.4rem 0.5rem;
+	border-radius: 6px;
+	border: 1px solid var(--background-modifier-border);
+	background: var(--background-secondary);
+}
+
+.wr-sidebar-label {
 	display: flex;
 	align-items: center;
+	gap: 0.5rem;
+	font-size: 0.9rem;
+}
+
+.wr-sidebar-label input[type="checkbox"] {
+	margin: 0;
+}
+
+.wr-sidebar-color {
+	width: 12px;
+	height: 12px;
+	border-radius: 50%;
+	border: 1px solid var(--background-modifier-border);
+}
+
+.wr-sidebar-controls {
+	display: flex;
 	gap: 0.75rem;
 }
 
-.wr-agent-block {
-	border: 1px solid var(--background-modifier-border);
-	border-radius: 8px;
-	padding: 8px 10px;
-	margin: 8px 0 14px 0;
+.wr-sidebar-controls button {
+	flex: 1;
+	padding: 0.5rem 0.75rem;
+	border-radius: 6px;
+	border: 1px solid var(--interactive-border);
+	background: var(--interactive-normal);
+	color: var(--interactive-normal-foreground);
+}
+
+.wr-sidebar-controls button:disabled {
+	opacity: 0.5;
+	cursor: not-allowed;
+}
+
+.wr-sidebar-empty {
+	font-size: 0.9rem;
+	color: var(--text-muted);
+	display: flex;
+	flex-direction: column;
+	gap: 0.75rem;
+}
+
+.wr-sidebar-empty button {
+	align-self: flex-start;
+	padding: 0.4rem 0.75rem;
+	border-radius: 6px;
+	border: 1px solid var(--interactive-border);
+	background: var(--interactive-normal);
+	color: var(--interactive-normal-foreground);
 }
 
 /* Inline comment bubble fallback styles (CM6 theme also sets some) */

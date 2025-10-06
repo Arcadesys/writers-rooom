@@ -2,39 +2,25 @@ export interface WriterAgent {
   id: string;
   name: string;
   systemPrompt: string;
-  enabled: boolean;
   color: string;
 }
 
 export interface WriterRoomSettings {
-  agents: WriterAgent[];
   apiKey: string;
-  modelName: string;
+  model: string;
 }
 
 export const DEFAULT_SETTINGS: WriterRoomSettings = {
-  agents: [],
   apiKey: "",
-  modelName: ""
+  model: "latest",
 };
 
-export function createAgent(partial?: Partial<WriterAgent>): WriterAgent {
-  const id = `agent_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-  return {
-    id,
-    name: partial?.name ?? "New Agent",
-    systemPrompt: partial?.systemPrompt ?? "",
-    enabled: partial?.enabled ?? true,
-    color: partial?.color ?? randomColor(),
-  };
-}
-
-function randomColor(): string {
-  const hue = Math.floor(Math.random() * 360);
-  return `hsl(${hue} 80% 70%)`;
-}
-
-type FetchResult = Response | { text: string };
+export const CLAUDE_MODELS = [
+  { id: "latest", label: "Latest (recommended)" },
+  { id: "claude-3-5-sonnet-20240620", label: "Claude 3.5 Sonnet (2024-06-20)" },
+  { id: "claude-3-opus-20240229", label: "Claude 3 Opus (2024-02-29)" },
+  { id: "claude-3-haiku-20240307", label: "Claude 3 Haiku (2024-03-07)" },
+];
 
 export interface WriterComment {
   line: number;
@@ -73,10 +59,7 @@ export async function callAgent(
   agent: WriterAgent,
   docContent: string
 ): Promise<AgentRunResult> {
-  const model = settings.modelName?.trim() || "claude-3-5-sonnet-20240620";
-  if (model.startsWith("gpt")) {
-    return callAgentOpenAI(settings, agent, docContent, model);
-  }
+  const model = resolveClaudeModel(settings.model);
   return callAgentClaude(settings, agent, docContent, model);
 }
 
@@ -121,44 +104,6 @@ async function callAgentClaude(
   return { agent, raw: json, comments };
 }
 
-async function callAgentOpenAI(
-  settings: WriterRoomSettings,
-  agent: WriterAgent,
-  docContent: string,
-  model: string
-): Promise<AgentRunResult> {
-  if (!settings.apiKey) {
-    return { agent, comments: [], error: "Missing API key" };
-  }
-
-  const body = {
-    model,
-    messages: [
-      { role: "system", content: agent.systemPrompt || "You are an assistant." },
-      { role: "user", content: docContent },
-    ],
-    temperature: 0.2,
-  } as const;
-
-  const resp = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${settings.apiKey}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify(body),
-  });
-
-  if (!resp.ok) {
-    const text = await safeText(resp);
-    return { agent, comments: [], error: `HTTP ${resp.status}: ${text}` };
-  }
-  const json = await resp.json();
-  const text = json?.choices?.[0]?.message?.content || "";
-  const comments = parseFeedbackText(text, agent);
-  return { agent, raw: json, comments };
-}
-
 function extractAnthropicText(json: any): string {
   const parts = json?.content ?? [];
   return parts
@@ -167,12 +112,9 @@ function extractAnthropicText(json: any): string {
     .join("\n\n");
 }
 
-async function safeText(resp: FetchResult): Promise<string> {
+async function safeText(resp: Response): Promise<string> {
   try {
-    if (resp instanceof Response) {
-      return await resp.text();
-    }
-    return (resp as any)?.text ?? "";
+    return await resp.text();
   } catch {
     return "";
   }
@@ -199,4 +141,11 @@ export function parseFeedbackText(text: string, agent: WriterAgent): WriterComme
     }
   }
   return out;
+}
+
+function resolveClaudeModel(model: string | undefined): string {
+  if (!model || model === "latest") {
+    return "claude-3-5-sonnet-latest";
+  }
+  return model;
 }
