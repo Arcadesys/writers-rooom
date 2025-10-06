@@ -1,4 +1,4 @@
-import { Editor, Notice, Plugin, MarkdownView, TFile, WorkspaceLeaf, TAbstractFile } from "obsidian";
+import { App, Editor, Notice, Plugin, MarkdownView, TFile, WorkspaceLeaf, TAbstractFile, Modal, Setting } from "obsidian";
 import { DEFAULT_SETTINGS, type WriterAgent, type WriterRoomSettings, runAgentsSequential, type WriterComment } from "./agent";
 import { applyComments, clearComments } from "./comment-renderer";
 import { WriterRoomSettingTab } from "./settings";
@@ -88,6 +88,14 @@ export default class WriterRoomPlugin extends Plugin {
 			name: "Export Writer Room Feedback",
 			callback: async () => {
 				await this.exportFeedback();
+			},
+		});
+
+		this.addCommand({
+			id: "writer-room-create-agent",
+			name: "Writer Room: Add New Agent",
+			callback: async () => {
+				await this.createNewAgentCommand();
 			},
 		});
 	}
@@ -211,7 +219,21 @@ export default class WriterRoomPlugin extends Plugin {
 
 	async openAgentsFolder() {
 		await ensureAgentsFolder(this.app);
-		this.app.workspace.openLinkText(`${AGENTS_FOLDER}/`, "", false);
+		const folder = this.app.vault.getAbstractFileByPath(AGENTS_FOLDER);
+		if (!folder) {
+			new Notice("Writer Room: Unable to locate agents folder.");
+			return;
+		}
+
+		const explorerLeaf = this.app.workspace.getLeavesOfType("file-explorer")[0];
+		if (explorerLeaf?.view && typeof (explorerLeaf.view as any).revealInFolder === "function") {
+			// Reveal the existing folder instead of triggering Obsidian to create a new one
+			(explorerLeaf.view as any).revealInFolder(folder);
+			this.app.workspace.revealLeaf(explorerLeaf);
+			return;
+		}
+
+		this.app.workspace.openLinkText(AGENTS_FOLDER, "", false);
 	}
 
 	async createExampleAgent() {
@@ -222,10 +244,90 @@ export default class WriterRoomPlugin extends Plugin {
 			new Notice("Example agent already exists.");
 			return;
 		}
-		const content = `---\nname: Punch-Up Specialist\ncolor: hsl(12 80% 60%)\n---\nYou are the punch-up specialist in a TV writer's room.\n\nFocus on infusing dialogue with wit and tightening scenes.\nRespond with inline feedback using the format: [LINE:12] Note.`;
-		await this.app.vault.create(path, content);
-		new Notice("Created example agent in writers-room-agents.");
+		try {
+			await this.createAgentFile(path, {
+				name: "Punch-Up Specialist",
+				color: "hsl(12 80% 60%)",
+				body: "You are the punch-up specialist in a TV writer's room.\n\nFocus on infusing dialogue with wit and tightening scenes.\nRespond with inline feedback using the format: [LINE:12] Note.",
+			});
+			new Notice("Created example agent in writers-room-agents.");
+		} catch (error) {
+			console.error("Writer Room → failed to create example agent", error);
+			new Notice("Writer Room: Failed to create example agent.");
+			return;
+		}
 		await this.refreshAgents();
+	}
+
+	private async createAgentFile(
+		path: string,
+		options: { name?: string; color?: string; body?: string }
+	) {
+		const { name = "New Agent", color = "hsl(210 80% 70%)", body = "" } = options;
+		const content = `---\nname: ${name}\ncolor: ${color}\n---\n${body}`;
+		await this.app.vault.create(path, content);
+	}
+
+	private generateAgentFilename(baseName: string): string {
+		const sanitized = baseName
+			.toLowerCase()
+			.replace(/[^a-z0-9]+/g, "-")
+			.replace(/^-+|-+$/g, "")
+			|| "agent";
+		let candidate = `${AGENTS_FOLDER}/${sanitized}.md`;
+		let counter = 2;
+		while (this.app.vault.getAbstractFileByPath(candidate)) {
+			candidate = `${AGENTS_FOLDER}/${sanitized}-${counter}.md`;
+			counter += 1;
+		}
+		return candidate;
+	}
+
+	private async createNewAgentCommand() {
+		await ensureAgentsFolder(this.app);
+		const name = await this.promptForAgentName();
+		if (!name) {
+			return;
+		}
+		const path = this.generateAgentFilename(name);
+		const body = `You are ${name} in a writer's room.\n\nDescribe your speciality and provide feedback as [LINE:x] comments.`;
+		try {
+			await this.createAgentFile(path, { name, body });
+		} catch (error) {
+			console.error("Writer Room → failed to create agent", error);
+			new Notice("Writer Room: Failed to create agent file.");
+			return;
+		}
+		await this.refreshAgents();
+		new Notice(`Created agent “${name}”.`);
+		await this.openAgentFile(path);
+	}
+
+	private async promptForAgentName(): Promise<string | null> {
+		return new Promise((resolve) => {
+			const modal = new (class extends PromptModal {
+				constructor(plugin: WriterRoomPlugin) {
+					super(plugin.app, "New Agent Name", "e.g. Structure Specialist");
+				}
+
+				onSubmit(value: string) {
+					resolve(value.trim());
+				}
+
+				onCancel() {
+					resolve(null);
+				}
+			})(this);
+			modal.open();
+		});
+	}
+
+	private async openAgentFile(path: string) {
+		const file = this.app.vault.getAbstractFileByPath(path);
+		if (file instanceof TFile) {
+			const leaf = this.app.workspace.getLeaf(false);
+			await leaf.openFile(file);
+		}
 	}
 
 	// orchestrates agent execution and inline feedback application
@@ -315,5 +417,75 @@ export default class WriterRoomPlugin extends Plugin {
 			console.error("Writer Room → export error", e);
 			new Notice("Writer Room: Failed to export feedback.");
 		}
+	}
+}
+
+class PromptModal extends Modal {
+	private titleText: string;
+	private placeholder: string;
+	private initialValue: string;
+	private didSubmit = false;
+	private currentValue: string;
+
+	constructor(app: App, titleText: string, placeholder: string, initialValue = "") {
+		super(app);
+		this.titleText = titleText;
+		this.placeholder = placeholder;
+		this.initialValue = initialValue;
+		this.currentValue = initialValue;
+	}
+
+	protected onSubmit(_value: string): void {}
+	protected onCancel(): void {}
+
+	override onOpen(): void {
+		const { contentEl } = this;
+		contentEl.empty();
+		contentEl.createEl("h2", { text: this.titleText });
+
+		new Setting(contentEl)
+			.setName("Agent name")
+			.setDesc("Pick something descriptive, e.g. Structure Specialist or Tone Coach.")
+			.addText((text) => {
+				text.setPlaceholder(this.placeholder)
+					.setValue(this.initialValue)
+					.onChange((value) => {
+						this.currentValue = value;
+					});
+				text.inputEl.addEventListener("keydown", (event) => {
+					if (event.key === "Enter") {
+						event.preventDefault();
+						this.submit();
+					}
+				});
+				window.setTimeout(() => text.inputEl.focus(), 50);
+			});
+
+		const buttons = contentEl.createDiv({ cls: "modal-button-container" });
+		const createBtn = buttons.createEl("button", { text: "Create", cls: "mod-cta" });
+		createBtn.onclick = () => this.submit();
+		const cancelBtn = buttons.createEl("button", { text: "Cancel" });
+		cancelBtn.onclick = () => {
+			this.close();
+		};
+	}
+
+	override onClose(): void {
+		super.onClose();
+		this.contentEl.empty();
+		if (!this.didSubmit) {
+			this.onCancel();
+		}
+	}
+
+	private submit() {
+		const trimmed = this.currentValue.trim();
+		if (!trimmed) {
+			new Notice("Please enter a name for the agent.");
+			return;
+		}
+		this.didSubmit = true;
+		this.close();
+		this.onSubmit(trimmed);
 	}
 }
