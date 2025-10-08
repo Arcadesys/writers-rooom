@@ -84,6 +84,46 @@
 	color: var(--interactive-normal-foreground);
 }
 
+.wr-modal-desc {
+	margin: 0;
+	font-size: 0.9rem;
+	color: var(--text-muted);
+}
+
+.wr-agent-picker {
+	display: flex;
+	flex-direction: column;
+	gap: 0.5rem;
+	margin-top: 1rem;
+	margin-bottom: 1rem;
+}
+
+.wr-agent-picker__item {
+	display: flex;
+	align-items: center;
+	gap: 0.6rem;
+	padding: 0.4rem 0.5rem;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 6px;
+	background: var(--background-secondary);
+}
+
+.wr-agent-picker__item input[type="checkbox"] {
+	margin: 0;
+}
+
+.wr-agent-picker__color {
+	width: 12px;
+	height: 12px;
+	border-radius: 50%;
+	border: 1px solid var(--background-modifier-border);
+}
+
+.wr-agent-picker__name {
+	font-size: 0.95rem;
+	font-weight: 500;
+}
+
 /* Inline comment bubble fallback styles (CM6 theme also sets some) */
 .wr-comment-bubble {
 	color: var(--text-normal);

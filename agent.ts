@@ -1,3 +1,6 @@
+import Anthropic from "@anthropic-ai/sdk";
+import { AnthropicError, APIError } from "@anthropic-ai/sdk/error";
+
 export interface WriterAgent {
   id: string;
   name: string;
@@ -35,6 +38,19 @@ export interface AgentRunResult {
   raw?: unknown;
   comments: WriterComment[];
   error?: string;
+  durationMs?: number;
+  startedAt?: string;
+}
+
+const anthropicClients = new Map<string, Anthropic>();
+
+function getAnthropicClient(apiKey: string): Anthropic {
+  let client = anthropicClients.get(apiKey);
+  if (!client) {
+    client = new Anthropic({ apiKey });
+    anthropicClients.set(apiKey, client);
+  }
+  return client;
 }
 
 export async function runAgentsSequential(
@@ -44,11 +60,15 @@ export async function runAgentsSequential(
 ): Promise<AgentRunResult[]> {
   const results: AgentRunResult[] = [];
   for (const agent of agents) {
+    const startTime = Date.now();
+    const startedAt = new Date(startTime).toISOString();
     try {
       const res = await callAgent(settings, agent, docContent);
-      results.push(res);
+      const durationMs = Date.now() - startTime;
+      results.push({ ...res, durationMs, startedAt });
     } catch (e: any) {
-      results.push({ agent, comments: [], error: String(e) });
+      const durationMs = Date.now() - startTime;
+      results.push({ agent, comments: [], error: String(e), durationMs, startedAt });
     }
   }
   return results;
@@ -73,50 +93,76 @@ async function callAgentClaude(
     return { agent, comments: [], error: "Missing API key" };
   }
 
-  const body = {
-    model,
-    max_tokens: 1200,
-    messages: [
-      {
-        role: "user",
-        content: `${agent.systemPrompt}\n\n---\n\n${docContent}`,
-      },
-    ],
-  } as const;
+  const client = getAnthropicClient(settings.apiKey);
+  try {
+    const response = await client.messages.create({
+      model,
+      max_tokens: 1200,
+      system: agent.systemPrompt,
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: buildDocumentPayload(docContent),
+            },
+          ],
+        },
+      ],
+    });
 
-  const resp = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "x-api-key": settings.apiKey,
-      "anthropic-version": "2023-06-01",
-      "content-type": "application/json",
-    },
-    body: JSON.stringify(body),
-  });
-
-  if (!resp.ok) {
-    const text = await safeText(resp);
-    return { agent, comments: [], error: `HTTP ${resp.status}: ${text}` };
+    const text = extractAnthropicText(response);
+    const comments = parseFeedbackText(text, agent);
+    return { agent, raw: response, comments };
+  } catch (error: unknown) {
+    const message = describeAnthropicError(error);
+    return { agent, comments: [], error: message };
   }
-  const json = await resp.json();
-  const text = extractAnthropicText(json);
-  const comments = parseFeedbackText(text, agent);
-  return { agent, raw: json, comments };
 }
 
-function extractAnthropicText(json: any): string {
+function extractAnthropicText(json: { content?: Array<{ type?: string; text?: string }> }): string {
   const parts = json?.content ?? [];
   return parts
-    .filter((p: any) => p?.type === "text" && typeof p?.text === "string")
-    .map((p: any) => p.text)
+    .filter((part): part is { type: string; text: string } => part?.type === "text" && typeof part?.text === "string")
+    .map((part) => part.text)
     .join("\n\n");
 }
 
-async function safeText(resp: Response): Promise<string> {
+function buildDocumentPayload(docContent: string): string {
+  return `Here is the document to review. Provide feedback using [LINE:x] format.\n\n---\n${docContent}\n---`;
+}
+
+function describeAnthropicError(error: unknown): string {
+  if (typeof error === "string") {
+    return error;
+  }
+  if (error instanceof AnthropicError) {
+    const apiError = error as APIError;
+    const details: string[] = [];
+    if (typeof apiError.status === "number") {
+      details.push(`HTTP ${apiError.status}`);
+    }
+    if (apiError.requestID) {
+      details.push(`request ${apiError.requestID}`);
+    }
+    if (apiError.error && typeof apiError.error === "object") {
+      const code = (apiError.error as { type?: string; code?: string }).code ?? (apiError.error as { type?: string }).type;
+      if (code) {
+        details.push(String(code));
+      }
+    }
+    const baseMessage = apiError.message || "Anthropic API error";
+    const suffix = details.length ? ` (${details.join(", ")})` : "";
+    return `${baseMessage}${suffix}`;
+  }
+  if (error instanceof Error) {
+    return error.message || error.toString();
+  }
   try {
-    return await resp.text();
+    return JSON.stringify(error);
   } catch {
-    return "";
+    return String(error);
   }
 }
 

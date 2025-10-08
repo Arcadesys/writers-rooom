@@ -2,7 +2,7 @@ import { App, Editor, Notice, Plugin, MarkdownView, TFile, WorkspaceLeaf, TAbstr
 import { DEFAULT_SETTINGS, type WriterAgent, type WriterRoomSettings, runAgentsSequential, type WriterComment } from "./agent";
 import { applyComments, clearComments } from "./comment-renderer";
 import { WriterRoomSettingTab } from "./settings";
-import { ensureAgentsFolder, loadAgentsFromFolder, AGENTS_FOLDER } from "./agent-store";
+import { ensureAgentsFolder, ensureDefaultAgents, loadAgentsFromFolder, AGENTS_FOLDER } from "./agent-store";
 import { WriterRoomSidebarView, VIEW_TYPE_WRITER_ROOM } from "./sidebar-view";
 
 export default class WriterRoomPlugin extends Plugin {
@@ -11,10 +11,12 @@ export default class WriterRoomPlugin extends Plugin {
 	selectedAgentIds: Set<string> = new Set();
 	sidebarView: WriterRoomSidebarView | null = null;
 	private agentRefreshTimer: number | null = null;
+	private runCounter = 0;
 
 	async onload() {
 		await this.loadSettings();
 		await ensureAgentsFolder(this.app);
+		await ensureDefaultAgents(this.app);
 		await this.refreshAgents();
 
 		this.registerView(VIEW_TYPE_WRITER_ROOM, (leaf: WorkspaceLeaf) => {
@@ -43,7 +45,7 @@ export default class WriterRoomPlugin extends Plugin {
 				new Notice("Open a Markdown file to run Writer Room.");
 				return;
 			}
-			await this.runWriterRoom(editor, view);
+			await this.runWriterRoomInteractive(editor, view);
 		});
 
 		// command palette shortcut
@@ -52,7 +54,7 @@ export default class WriterRoomPlugin extends Plugin {
 			name: "Run Writer Room",
 			hotkeys: [{ modifiers: ["Mod", "Shift"], key: "R" }],
 			editorCallback: async (editor, view) => {
-				await this.runWriterRoom(editor, view as MarkdownView);
+				await this.runWriterRoomInteractive(editor, view as MarkdownView);
 			},
 		});
 
@@ -64,7 +66,7 @@ export default class WriterRoomPlugin extends Plugin {
 						.setTitle("Run Writer Room")
 						.setIcon("bot")
 						.onClick(async () => {
-							await this.runWriterRoom(editor, view as MarkdownView);
+							await this.runWriterRoomInteractive(editor, view as MarkdownView);
 						})
 				);
 			})
@@ -217,6 +219,57 @@ export default class WriterRoomPlugin extends Plugin {
 		await this.runWriterRoom(editor, view, this.getSelectedAgents());
 	}
 
+	private async runWriterRoomInteractive(editor: Editor, view?: MarkdownView) {
+		await this.ensureSidebarVisible();
+		if (!this.agents.length) {
+			new Notice("Writer Room: No agents available. Add markdown agents to the writers-room-agents folder.");
+			return;
+		}
+
+		const chosen = await this.promptForAgentsToRun();
+		if (!chosen || !chosen.length) {
+			return;
+		}
+
+		this.setSelectedAgentIds(chosen.map((agent) => agent.id));
+		await this.runWriterRoom(editor, view, chosen);
+	}
+
+	private setSelectedAgentIds(ids: Iterable<string>) {
+		this.selectedAgentIds = new Set(ids);
+		this.sidebarView?.render();
+	}
+
+	private async ensureSidebarVisible() {
+		await this.activateSidebar();
+		const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_WRITER_ROOM);
+		if (leaves.length) {
+			const leaf = leaves[0];
+			this.app.workspace.revealLeaf(leaf);
+			const view = leaf.view;
+			if (view instanceof WriterRoomSidebarView) {
+				this.sidebarView = view;
+				view.render();
+			}
+		}
+	}
+
+	private async promptForAgentsToRun(): Promise<WriterAgent[] | null> {
+		if (!this.agents.length) {
+			return null;
+		}
+		const initial = new Set(this.selectedAgentIds);
+		const selectedIds = await new Promise<string[] | null>((resolve) => {
+			const modal = new AgentSelectionModal(this.app, this.agents, initial, resolve);
+			modal.open();
+		});
+		if (!selectedIds || !selectedIds.length) {
+			return null;
+		}
+		const selectedSet = new Set(selectedIds);
+		return this.agents.filter((agent) => selectedSet.has(agent.id));
+	}
+
 	async openAgentsFolder() {
 		await ensureAgentsFolder(this.app);
 		const folder = this.app.vault.getAbstractFileByPath(AGENTS_FOLDER);
@@ -338,48 +391,109 @@ export default class WriterRoomPlugin extends Plugin {
 			agentsToRun = this.agents;
 		}
 
+		const runId = ++this.runCounter;
+		const runLabel = `Writer Room Run #${runId}`;
+		const groupLabel = `[Writer Room] ${runLabel}`;
+		const startedAt = new Date();
+		const activeFilePath = view?.file?.path ?? this.app.workspace.getActiveFile()?.path ?? "(unsaved)";
+		const configuredModel = this.settings.model || "latest";
+		const agentNames = agentsToRun.map((agent) => `${agent.name} (${agent.id})`);
+
+		console.groupCollapsed(groupLabel);
+		console.log("Started:", startedAt.toLocaleString());
+		console.log("Source file:", activeFilePath);
+		console.log("Document length:", doc.length);
+		console.log("Configured model:", configuredModel);
+		console.log("Agents requested:", agentNames.length ? agentNames : ["<none>"]);
+
 		if (!agentsToRun.length) {
+			console.warn("Aborting run → no agents available.");
+			console.groupEnd();
 			new Notice("Writer Room: No agents available. Add markdown agents to the writers-room-agents folder.");
 			return;
 		}
 
 		if (!this.settings.apiKey) {
+			console.warn("Aborting run → missing API key in settings.");
+			console.groupEnd();
 			new Notice("Writer Room: Missing API key in settings.");
 			return;
 		}
 
+		const agentCount = agentsToRun.length;
 		const status = this.addStatusBarItem();
-		status.setText(`Writer Room: Running ${agentsToRun.length} agent(s)...`);
-		new Notice(`Writer Room: Running ${agentsToRun.length} agent(s)...`);
-		console.log("Writer Room → Document length:", doc.length);
+		status.setText(`Writer Room: Running ${agentCount} agent(s)...`);
+		new Notice(`Writer Room: Running ${agentCount} agent(s)...`);
+
+		const runStart = Date.now();
 
 		try {
 			const results = await runAgentsSequential(this.settings, agentsToRun, doc);
 			let totalComments = 0;
 			const allComments: WriterComment[] = [];
+			const agentSummaries: { agent: string; comments: number; duration: string; error?: string }[] = [];
+
 			for (const r of results) {
+				const commentCount = r.comments.length;
+				totalComments += commentCount;
+				allComments.push(...r.comments);
+				agentSummaries.push({
+					agent: r.agent.name,
+					comments: commentCount,
+					duration: this.formatDuration(r.durationMs),
+					error: r.error,
+				});
+
+				const agentLabel = `${r.agent.name} (${r.agent.id})`;
 				if (r.error) {
-					console.warn(`Agent ${r.agent.name} error:`, r.error);
+					console.error(`${agentLabel} error:`, r.error);
 				}
-				console.group(`Writer Room → ${r.agent.name}`);
-				for (const c of r.comments) {
-					console.log(`[LINE:${c.line}]`, c.text);
+				console.groupCollapsed(`[Writer Room] Agent → ${agentLabel}`);
+				if (typeof r.durationMs === "number") {
+					console.log("Duration:", this.formatDuration(r.durationMs));
+				}
+				if (r.error) {
+					console.log("Error:", r.error);
+				}
+				if (!r.comments.length) {
+					console.log("No comments returned.");
+				} else {
+					for (const c of r.comments) {
+						console.log(`[LINE:${c.line}]`, c.text);
+					}
 				}
 				console.groupEnd();
-				totalComments += r.comments.length;
-				allComments.push(...r.comments);
 			}
+
 			const cm: any = (view as any)?.editor?.cm;
 			if (cm) {
 				applyComments(cm, allComments);
 			}
+			const totalDuration = Date.now() - runStart;
+			if (agentSummaries.length) {
+				console.table(agentSummaries);
+			}
+			console.log(`Total comments: ${totalComments}`);
+			console.log(`Run duration: ${this.formatDuration(totalDuration)}`);
 			new Notice(`Writer Room: Done. Parsed ${totalComments} comment(s).`);
 			(this as any)._lastResults = results;
 		} catch (e: any) {
-			console.error("Writer Room → run error", e);
+			console.error(`${groupLabel} error`, e);
 			new Notice("Writer Room: Error running agents (see console).");
+		} finally {
+			status.remove();
+			console.groupEnd();
 		}
-		status.remove();
+	}
+
+	private formatDuration(durationMs?: number): string {
+		if (typeof durationMs !== "number" || Number.isNaN(durationMs)) {
+			return "n/a";
+		}
+		if (durationMs < 1000) {
+			return `${Math.max(0, Math.round(durationMs))}ms`;
+		}
+		return `${(durationMs / 1000).toFixed(2)}s`;
 	}
 
 	private async exportFeedback() {
@@ -416,6 +530,83 @@ export default class WriterRoomPlugin extends Plugin {
 		} catch (e: any) {
 			console.error("Writer Room → export error", e);
 			new Notice("Writer Room: Failed to export feedback.");
+		}
+	}
+}
+
+class AgentSelectionModal extends Modal {
+	private agents: WriterAgent[];
+	private selected: Set<string>;
+	private resolve: (value: string[] | null) => void;
+	private didSubmit = false;
+	private runButton: HTMLButtonElement | null = null;
+
+	constructor(app: App, agents: WriterAgent[], initialSelected: Set<string>, resolve: (value: string[] | null) => void) {
+		super(app);
+		this.agents = agents;
+		this.selected = new Set(initialSelected);
+		this.resolve = resolve;
+	}
+
+	override onOpen(): void {
+		const { contentEl } = this;
+		contentEl.empty();
+		contentEl.createEl("h2", { text: "Select agents to run" });
+		contentEl.createEl("p", {
+			text: "Pick the writer room agents you want to include in this run.",
+			cls: "wr-modal-desc",
+		});
+
+		const list = contentEl.createDiv({ cls: "wr-agent-picker" });
+		for (const agent of this.agents) {
+			const row = list.createEl("label", { cls: "wr-agent-picker__item" });
+			const checkbox = row.createEl("input", { type: "checkbox" });
+			checkbox.checked = this.selected.has(agent.id);
+			checkbox.onchange = () => this.toggle(agent.id, checkbox.checked);
+
+			const color = row.createSpan({ cls: "wr-agent-picker__color" });
+			color.style.backgroundColor = agent.color;
+			row.createSpan({ text: agent.name, cls: "wr-agent-picker__name" });
+		}
+
+		const buttons = contentEl.createDiv({ cls: "modal-button-container" });
+		this.runButton = buttons.createEl("button", { text: "Run", cls: "mod-cta" });
+		this.runButton.onclick = () => this.submit();
+		const cancelBtn = buttons.createEl("button", { text: "Cancel" });
+		cancelBtn.onclick = () => this.close();
+
+		this.updateRunButtonState();
+	}
+
+	override onClose(): void {
+		super.onClose();
+		this.contentEl.empty();
+		if (!this.didSubmit) {
+			this.resolve(null);
+		}
+	}
+
+	private toggle(id: string, checked: boolean) {
+		if (checked) {
+			this.selected.add(id);
+		} else {
+			this.selected.delete(id);
+		}
+		this.updateRunButtonState();
+	}
+
+	private submit() {
+		if (!this.selected.size) {
+			return;
+		}
+		this.didSubmit = true;
+		this.close();
+		this.resolve(Array.from(this.selected));
+	}
+
+	private updateRunButtonState() {
+		if (this.runButton) {
+			this.runButton.disabled = this.selected.size === 0;
 		}
 	}
 }
